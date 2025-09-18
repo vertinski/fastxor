@@ -18,8 +18,17 @@ static PyObject* fast_xor64(PyObject* self, PyObject* args) {
     // Get data pointers and sizes
     Py_ssize_t size1 = PyBytes_Size(bytes1);
     Py_ssize_t size2 = PyBytes_Size(bytes2);
+
+    /* Acquire raw pointers; PyBytes_AsString can return NULL on failure */
     const char* data1 = PyBytes_AsString(bytes1);
+    if (!data1) {
+        /* Propagate the Python error already set */
+        return NULL;
+    }
     const char* data2 = PyBytes_AsString(bytes2);
+    if (!data2) {
+        return NULL;
+    }
     
     // Validate input sizes
     if (size1 != size2) {
@@ -37,27 +46,28 @@ static PyObject* fast_xor64(PyObject* self, PyObject* args) {
         return NULL;
     }
     
-    // Allocate result buffer
-    char* result = (char*)malloc(size1);
+    /* Convert to size_t to avoid signed/unsigned mismatch and potential overflow */
+    if (size1 < 0) {
+        PyErr_SetString(PyExc_OverflowError, "Negative size encountered");
+        return NULL;
+    }
+    size_t alloc_size = (size_t)size1;
+
+    /* Allocate result buffer using CPython allocator for better tracking */
+    char* result = (char*)PyMem_Malloc(alloc_size);
     if (!result) {
         PyErr_SetString(PyExc_MemoryError, "Failed to allocate memory for result");
         return NULL;
     }
     
-    // Perform 64-bit XOR operations
-    const uint64_t* ptr1 = (const uint64_t*)data1;
-    const uint64_t* ptr2 = (const uint64_t*)data2;
-    uint64_t* result_ptr = (uint64_t*)result;
-    
-    Py_ssize_t num_chunks = size1 / 8;
-    
-    for (Py_ssize_t i = 0; i < num_chunks; i++) {
-        result_ptr[i] = ptr1[i] ^ ptr2[i];
+    /* Perform XOR safely byte-by-byte to avoid alignment and aliasing UB */
+    for (Py_ssize_t i = 0; i < size1; i++) {
+        result[i] = data1[i] ^ data2[i];
     }
     
     // Create Python bytes object from result
     PyObject* result_bytes = PyBytes_FromStringAndSize(result, size1);
-    free(result);
+    PyMem_Free(result);
     
     if (!result_bytes) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to create result bytes object");
@@ -80,8 +90,15 @@ static PyObject* flexible_xor(PyObject* self, PyObject* args) {
     
     Py_ssize_t size1 = PyBytes_Size(bytes1);
     Py_ssize_t size2 = PyBytes_Size(bytes2);
+
     const char* data1 = PyBytes_AsString(bytes1);
+    if (!data1) {
+        return NULL;
+    }
     const char* data2 = PyBytes_AsString(bytes2);
+    if (!data2) {
+        return NULL;
+    }
     
     if (size1 != size2) {
         PyErr_SetString(PyExc_ValueError, "Byte objects must have the same length");
@@ -92,36 +109,25 @@ static PyObject* flexible_xor(PyObject* self, PyObject* args) {
         return PyBytes_FromStringAndSize("", 0);
     }
     
-    char* result = (char*)malloc(size1);
+    if (size1 < 0) {
+        PyErr_SetString(PyExc_OverflowError, "Negative size encountered");
+        return NULL;
+    }
+    size_t alloc_size = (size_t)size1;
+    char* result = (char*)PyMem_Malloc(alloc_size);
     if (!result) {
         PyErr_SetString(PyExc_MemoryError, "Failed to allocate memory for result");
         return NULL;
     }
     
-    Py_ssize_t i = 0;
-    
-    // Process 64-bit chunks
-    if (size1 >= 8) {
-        const uint64_t* ptr1 = (const uint64_t*)data1;
-        const uint64_t* ptr2 = (const uint64_t*)data2;
-        uint64_t* result_ptr = (uint64_t*)result;
-        
-        Py_ssize_t num_full_chunks = size1 / 8;
-        
-        for (Py_ssize_t j = 0; j < num_full_chunks; j++) {
-            result_ptr[j] = ptr1[j] ^ ptr2[j];
-        }
-        
-        i = num_full_chunks * 8;
+    /* Pure byte-wise XOR to avoid alignment UB; still vectorisable by compiler */
+    for (Py_ssize_t j = 0; j < size1; j++) {
+        result[j] = data1[j] ^ data2[j];
     }
-    
-    // Process remaining bytes
-    for (; i < size1; i++) {
-        result[i] = data1[i] ^ data2[i];
-    }
+    Py_ssize_t i = size1; /* for clarity; not used afterward */
     
     PyObject* result_bytes = PyBytes_FromStringAndSize(result, size1);
-    free(result);
+    PyMem_Free(result);
     
     if (!result_bytes) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to create result bytes object");
